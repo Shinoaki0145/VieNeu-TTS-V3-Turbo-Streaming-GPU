@@ -62,7 +62,7 @@
             <div class="field"><label for="max_chars">Max chars</label><input id="max_chars" type="number" required disabled></div>
             <div class="field"><label for="max_new_frames">Max new frames</label><input id="max_new_frames" type="number" required disabled></div>
           </div>
-          <div class="actions"><button id="play" type="button" disabled>Phát</button><button id="stop" type="button" disabled>Dừng</button><button id="reset" type="button" disabled>Đặt lại</button></div>
+          <div class="actions"><button id="play" type="button" disabled>Phát</button><button id="stop" type="button" disabled>Dừng</button><button id="replay" type="button" disabled>Phát lại</button><button id="save" type="button" disabled>Lưu</button><button id="reset" type="button" disabled>Đặt lại</button></div>
           <p id="status" role="status" aria-live="polite">Đang tải cấu hình…</p>
         </section>
         <section class="card" aria-labelledby="hardware-title"><h2 id="hardware-title">Phần cứng &amp; môi trường</h2><dl id="hardware"></dl></section>
@@ -102,6 +102,10 @@
     let runFailed = false;
     let completionTimer;
     let interimMetrics = null;
+    let completedRequestId;
+    let replayAudio;
+    let audioSaved = false;
+    let saving = false;
     const $ = id => document.getElementById(id);
     const numericControls = ["temperature", "top_k", "top_p", "repetition_penalty", "max_chars", "max_new_frames"];
     const editableControls = ["text", "voice", ...numericControls];
@@ -111,6 +115,18 @@
     function setRunning(running) {
       for (const id of [...editableControls, "play", "reset"]) $(id).disabled = running || !config;
       $("stop").disabled = !running;
+      $("replay").disabled = running || !completedRequestId;
+      $("save").disabled = running || saving || audioSaved || !completedRequestId;
+    }
+
+    function clearFinalAudio() {
+      replayAudio?.pause();
+      replayAudio = undefined;
+      completedRequestId = undefined;
+      audioSaved = false;
+      saving = false;
+      $("replay").disabled = true;
+      $("save").disabled = true;
     }
 
     function clearTelemetry() {
@@ -243,6 +259,7 @@
       controller?.abort();
       controller = undefined;
       stopAudio();
+      clearFinalAudio();
       pending = new Uint8Array(0);
       resetInterimMetrics();
       setRunning(false);
@@ -266,6 +283,8 @@
           $("status").textContent = "🔊 Đang phát stream…";
           break;
         case "run_completed":
+          completedRequestId = event.total_samples ? event.request_id : undefined;
+          audioSaved = false;
           for (const [id, value] of [
             ["ttfa", format(event.first_chunk_ms, 1, " ms")], ["duration", format(event.audio_duration_s, 2, " s")],
             ["generation", format(event.generation_time_s, 2, " s")], ["rtf", format(event.rtf, 3)],
@@ -301,6 +320,7 @@
       if (!payload || controller) return;
       const activeController = new AbortController();
       controller = activeController;
+      clearFinalAudio();
       pending = new Uint8Array(0);
       playHead = 0;
       runFailed = false;
@@ -363,7 +383,44 @@
     });
 
     $("stop").addEventListener("click", () => stopRun());
+    $("replay").addEventListener("click", async () => {
+      if (!completedRequestId) return;
+      try {
+        replayAudio?.pause();
+        replayAudio = new Audio("/api/audio?request_id=" + encodeURIComponent(completedRequestId));
+        replayAudio.onended = () => { $("status").textContent = "✅ Phát lại hoàn tất"; };
+        await replayAudio.play();
+        $("status").textContent = "🔁 Đang phát lại…";
+      } catch (error) {
+        $("status").textContent = "❌ Không thể phát lại: " + error.message;
+      }
+    });
+    $("save").addEventListener("click", async () => {
+      const requestId = completedRequestId;
+      if (!requestId || saving || audioSaved) return;
+      saving = true;
+      setRunning(false);
+      try {
+        const response = await fetch("/api/save", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({request_id: requestId})
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "HTTP " + response.status);
+        if (completedRequestId !== requestId) return;
+        audioSaved = true;
+        $("status").textContent = "✅ Đã lưu: " + result.path;
+      } catch (error) {
+        if (completedRequestId === requestId) $("status").textContent = "❌ Không thể lưu: " + error.message;
+      } finally {
+        if (completedRequestId === requestId) {
+          saving = false;
+          setRunning(false);
+        }
+      }
+    });
     $("reset").addEventListener("click", () => {
+      clearFinalAudio();
       applyDefaults();
       clearTelemetry();
       $("status").textContent = "Sẵn sàng";
