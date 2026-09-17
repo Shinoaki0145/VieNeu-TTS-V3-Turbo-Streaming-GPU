@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VieNeu · Streaming dashboard</title>
+  <style>
+    :root { color-scheme: light; --bg: #f2f5f8; --card: #fff; --ink: #182536; --muted: #526174; --line: #ccd5df; --accent: #1758b0; --focus: #a94600; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, sans-serif; }
+    main { max-width: 1440px; margin: auto; padding: 28px; }
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 4px; font-size: 1.9rem; }
+    h2 { font-size: 1.1rem; }
+    .subtitle, .hint { color: var(--muted); }
+    .layout { display: grid; grid-template-columns: minmax(290px, 360px) minmax(0, 1fr); gap: 20px; align-items: start; }
+    .stack { display: grid; gap: 20px; min-width: 0; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; min-width: 0; }
+    label { display: block; font-weight: 600; margin-bottom: 5px; }
+    input, select, textarea, button { font: inherit; }
+    input, select, textarea { width: 100%; color: var(--ink); background: var(--card); border: 1px solid #8b99aa; border-radius: 6px; padding: 9px; }
+    textarea { resize: vertical; min-height: 180px; }
+    .field { margin-bottom: 14px; min-width: 0; }
+    .parameters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    button { border: 1px solid var(--accent); border-radius: 6px; padding: 9px 15px; background: var(--card); color: var(--accent); cursor: pointer; }
+    #play { background: var(--accent); color: white; }
+    button:disabled { opacity: .5; cursor: default; }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+    #status { margin: 16px 0 0; overflow-wrap: anywhere; }
+    #hardware { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; margin: 0; font-size: .9rem; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 12px; }
+    .metric { padding: 14px; }
+    .metric span { display: block; font-size: .85rem; color: var(--muted); }
+    .metric strong { display: block; font-size: 1.45rem; margin-top: 5px; font-variant-numeric: tabular-nums; }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; font-variant-numeric: tabular-nums; }
+    caption { text-align: left; color: var(--muted); margin-bottom: 10px; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { white-space: nowrap; }
+    #text-chunks-body td:last-child { min-width: 180px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #audio-chunks-body td { white-space: nowrap; }
+    @media (max-width: 800px) { main { padding: 16px; } .layout { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>VieNeu · Giọng nói trực tiếp</h1><p class="subtitle">Tạo giọng nói và theo dõi từng chunk ngay trên máy của bạn.</p></header>
+    <div class="layout">
+      <div class="stack">
+        <section class="card" aria-labelledby="settings-title">
+          <h2 id="settings-title">Văn bản &amp; tham số</h2>
+          <div class="field"><label for="text">Văn bản tiếng Việt</label><textarea id="text" required disabled></textarea></div>
+          <div class="field"><label for="voice">Giọng đọc</label><select id="voice" required disabled></select></div>
+          <div class="parameters">
+            <div class="field"><label for="temperature">Temperature</label><input id="temperature" type="number" required disabled></div>
+            <div class="field"><label for="top_k">Top K</label><input id="top_k" type="number" required disabled></div>
+            <div class="field"><label for="top_p">Top P</label><input id="top_p" type="number" required disabled></div>
+            <div class="field"><label for="repetition_penalty">Repetition penalty</label><input id="repetition_penalty" type="number" required disabled></div>
+            <div class="field"><label for="max_chars">Max chars</label><input id="max_chars" type="number" required disabled></div>
+            <div class="field"><label for="max_new_frames">Max new frames</label><input id="max_new_frames" type="number" required disabled></div>
+          </div>
+          <div class="actions"><button id="play" type="button" disabled>Phát</button><button id="stop" type="button" disabled>Dừng</button><button id="reset" type="button" disabled>Đặt lại</button></div>
+          <p id="status" role="status" aria-live="polite">Đang tải cấu hình…</p>
+        </section>
+        <section class="card" aria-labelledby="hardware-title"><h2 id="hardware-title">Phần cứng &amp; môi trường</h2><dl id="hardware"></dl></section>
+      </div>
+      <div class="stack">
+        <section aria-label="Thống kê tổng quan" class="metrics">
+          <div class="card metric"><span>Chunk đầu tiên · TTFA</span><strong id="metric-ttfa">—</strong></div>
+          <div class="card metric"><span>Thời lượng audio</span><strong id="metric-duration">—</strong></div>
+          <div class="card metric"><span>Thời gian tạo</span><strong id="metric-generation">—</strong></div>
+          <div class="card metric"><span>RTF</span><strong id="metric-rtf">—</strong></div>
+          <div class="card metric"><span>Tốc độ thời gian thực</span><strong id="metric-speed">—</strong></div>
+          <div class="card metric"><span>Text chunks</span><strong id="metric-text-chunks">—</strong></div>
+          <div class="card metric"><span>Audio chunks</span><strong id="metric-audio-chunks">—</strong></div>
+        </section>
+        <section class="card" aria-labelledby="text-chunks-title">
+          <h2 id="text-chunks-title">Text chunks</h2>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Bảng text chunks">
+            <table><caption>Các đoạn văn bản được chia để tổng hợp giọng nói.</caption><thead><tr><th scope="col">#</th><th scope="col">Ký tự</th><th scope="col">Nội dung</th></tr></thead><tbody id="text-chunks-body"></tbody></table>
+          </div>
+        </section>
+        <section class="card" aria-labelledby="audio-chunks-title">
+          <h2 id="audio-chunks-title">Audio chunks</h2>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Bảng audio chunks">
+            <table><caption>Thời điểm tạo theo đồng hồ máy chủ; offset tính từ đầu lượt chạy.</caption><thead><tr><th scope="col">#</th><th scope="col">Samples</th><th scope="col">Audio</th><th scope="col">Bắt đầu</th><th scope="col">Kết thúc</th><th scope="col">Offset đầu</th><th scope="col">Offset cuối</th><th scope="col">Thời gian tạo</th></tr></thead><tbody id="audio-chunks-body"></tbody></table>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script type="module">
+    let config;
+    let controller;
+    let audioContext;
+    let playHead = 0;
+    let pending = new Uint8Array(0);
+    let scheduledSources = new Set();
+    let runFailed = false;
+    let completionTimer;
+    let interimMetrics = null;
+    const $ = id => document.getElementById(id);
+    const numericControls = ["temperature", "top_k", "top_p", "repetition_penalty", "max_chars", "max_new_frames"];
+    const editableControls = ["text", "voice", ...numericControls];
+    const decoder = new TextDecoder("utf-8", {fatal: true});
+    const format = (value, decimals, unit = "") => value == null ? "—" : Number(value).toFixed(decimals) + unit;
+
+    function setRunning(running) {
+      for (const id of [...editableControls, "play", "reset"]) $(id).disabled = running || !config;
+      $("stop").disabled = !running;
+    }
+
+    function clearTelemetry() {
+      $("text-chunks-body").replaceChildren();
+      $("audio-chunks-body").replaceChildren();
+      for (const metric of document.querySelectorAll(".metric strong")) metric.textContent = "—";
+      resetInterimMetrics();
+    }
+
+    function applyDefaults() {
+      for (const id of editableControls) $(id).value = config.defaults[id];
+    }
+
+    function addRow(body, values) {
+      const row = document.createElement("tr");
+      for (const value of values) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+      $(body).append(row);
+    }
+
+    function renderHardware(hardware) {
+      const gib = value => value == null ? "Không rõ" : (value / 1024 ** 3).toFixed(2) + " GiB";
+      const gpu = hardware.gpu || {};
+      const rows = [
+        ["Hệ điều hành", hardware.os], ["Kernel", hardware.kernel],
+        ["WSL", hardware.wsl == null ? null : hardware.wsl ? "Có" : "Không"],
+        ["CPU", hardware.cpu], ["RAM", gib(hardware.ram_total_bytes)],
+        ["GPU", gpu.name], ["Compute capability", gpu.compute_capability],
+        ["VRAM tổng", gib(gpu.vram_total_bytes)], ["VRAM trống", gib(gpu.vram_free_bytes)],
+        ["Python", hardware.python], ["VieNeu", hardware.vieneu],
+        ["PyTorch", hardware.torch], ["CUDA runtime", hardware.cuda_runtime]
+      ];
+      $("hardware").replaceChildren();
+      for (const [label, value] of rows) {
+        const term = document.createElement("dt");
+        const description = document.createElement("dd");
+        term.textContent = label;
+        description.textContent = value == null ? "Không rõ" : value;
+        $("hardware").append(term, description);
+      }
+    }
+
+    function requestPayload() {
+      let valid = true;
+      for (const id of editableControls) if (!$(id).reportValidity()) valid = false;
+      if (!valid) return null;
+      const payload = {text: $("text").value, voice: $("voice").value};
+      for (const id of numericControls) {
+        const value = $(id).valueAsNumber;
+        if (!Number.isFinite(value) || (["top_k", "max_chars", "max_new_frames"].includes(id) && !Number.isInteger(value))) return null;
+        payload[id] = value;
+      }
+      return payload;
+    }
+
+    function resetInterimMetrics() {
+      interimMetrics = {firstChunkMs: null, audioMs: 0, generationMs: 0};
+    }
+
+    function updateInterimMetrics(event) {
+      const audioMs = Number(event.audio_ms);
+      const generationMs = Number(event.end_offset_ms);
+      if (!Number.isFinite(audioMs) || !Number.isFinite(generationMs)) throw new Error("Audio telemetry không hợp lệ");
+      if (interimMetrics.firstChunkMs == null) interimMetrics.firstChunkMs = generationMs;
+      interimMetrics.audioMs += audioMs;
+      interimMetrics.generationMs = generationMs;
+      $("metric-ttfa").textContent = format(interimMetrics.firstChunkMs, 1, " ms");
+      $("metric-duration").textContent = format(interimMetrics.audioMs / 1000, 2, " s");
+      $("metric-generation").textContent = format(interimMetrics.generationMs / 1000, 2, " s");
+      $("metric-rtf").textContent = interimMetrics.audioMs ? format(interimMetrics.generationMs / interimMetrics.audioMs, 3) : "—";
+      $("metric-speed").textContent = interimMetrics.generationMs ? format(interimMetrics.audioMs / interimMetrics.generationMs, 2, "x") : "—";
+    }
+
+    function appendBytes(value) {
+      const joined = new Uint8Array(pending.length + value.length);
+      joined.set(pending);
+      joined.set(value, pending.length);
+      pending = joined;
+    }
+
+    function takeFrames() {
+      const frames = [];
+      let offset = 0;
+      while (pending.length - offset >= 5) {
+        const view = new DataView(pending.buffer, pending.byteOffset + offset, 5);
+        const type = view.getUint8(0);
+        const size = view.getUint32(1, true);
+        if (type !== 1 && type !== 2) throw new Error("Loại frame không hợp lệ: " + type);
+        if (pending.length - offset < 5 + size) break;
+        frames.push({type, payload: pending.slice(offset + 5, offset + 5 + size)});
+        offset += 5 + size;
+      }
+      pending = pending.slice(offset);
+      return frames;
+    }
+
+    function scheduleAudio(bytes) {
+      if (bytes.byteLength % 4) throw new Error("Audio frame không chia hết cho float32");
+      if (!bytes.byteLength) return;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const samples = new Float32Array(bytes.byteLength / 4);
+      for (let i = 0; i < samples.length; i++) samples[i] = view.getFloat32(i * 4, true);
+      if (!playHead) playHead = audioContext.currentTime + 0.25;
+      if (playHead < audioContext.currentTime) playHead = audioContext.currentTime + 0.05;
+      const buffer = audioContext.createBuffer(1, samples.length, config.sample_rate);
+      buffer.copyToChannel(samples, 0);
+      const source = audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContext.destination);
+      scheduledSources.add(source);
+      source.onended = () => { scheduledSources.delete(source); source.disconnect(); };
+      source.start(playHead);
+      playHead += samples.length / config.sample_rate;
+    }
+
+    function stopAudio() {
+      clearTimeout(completionTimer);
+      for (const source of scheduledSources) {
+        try { source.stop(); } catch {}
+        try { source.disconnect(); } catch {}
+      }
+      scheduledSources.clear();
+      playHead = 0;
+    }
+
+    function stopRun(message = "Đã dừng") {
+      controller?.abort();
+      controller = undefined;
+      stopAudio();
+      pending = new Uint8Array(0);
+      resetInterimMetrics();
+      setRunning(false);
+      $("status").textContent = message;
+    }
+
+    function renderEvent(event) {
+      switch (event.event) {
+        case "run_started":
+          clearTelemetry();
+          for (const chunk of event.text_chunks) addRow("text-chunks-body", [chunk.index, chunk.characters, chunk.text]);
+          $("metric-text-chunks").textContent = event.text_chunks.length;
+          $("status").textContent = "Đang chờ chunk đầu tiên…";
+          break;
+        case "audio_chunk":
+          addRow("audio-chunks-body", [event.index, event.samples, format(event.audio_ms, 1, " ms"),
+            event.started_at, event.finished_at, format(event.start_offset_ms, 1, " ms"),
+            format(event.end_offset_ms, 1, " ms"), format(event.generation_ms, 1, " ms")]);
+          $("metric-audio-chunks").textContent = $("audio-chunks-body").childElementCount;
+          updateInterimMetrics(event);
+          $("status").textContent = "🔊 Đang phát stream…";
+          break;
+        case "run_completed":
+          for (const [id, value] of [
+            ["ttfa", format(event.first_chunk_ms, 1, " ms")], ["duration", format(event.audio_duration_s, 2, " s")],
+            ["generation", format(event.generation_time_s, 2, " s")], ["rtf", format(event.rtf, 3)],
+            ["speed", format(event.realtime_speed, 2, "x")], ["text-chunks", event.text_chunk_count],
+            ["audio-chunks", event.audio_chunk_count]
+          ]) $("metric-" + id).textContent = value;
+          break;
+        case "error":
+          runFailed = true;
+          stopAudio();
+          $("status").textContent = "❌ " + event.message;
+          break;
+        default:
+          throw new Error("Sự kiện không hợp lệ: " + event.event);
+      }
+    }
+
+    function finishPlayback(activeController) {
+      if (controller !== activeController) return;
+      const remaining = Math.max(0, playHead - audioContext.currentTime);
+      if (remaining > 0) {
+        completionTimer = setTimeout(() => finishPlayback(activeController), Math.max(20, remaining * 1000));
+        return;
+      }
+      controller = undefined;
+      playHead = 0;
+      setRunning(false);
+      $("status").textContent = "✅ Hoàn tất";
+    }
+
+    $("play").addEventListener("click", async () => {
+      const payload = requestPayload();
+      if (!payload || controller) return;
+      const activeController = new AbortController();
+      controller = activeController;
+      pending = new Uint8Array(0);
+      playHead = 0;
+      runFailed = false;
+      setRunning(true);
+      clearTelemetry();
+      $("status").textContent = "Đang kết nối…";
+      let reader;
+      let terminal;
+      let started = false;
+      try {
+        audioContext ||= new AudioContext();
+        await audioContext.resume();
+        if (controller !== activeController) return;
+        const response = await fetch("/api/stream", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload), signal: activeController.signal
+        });
+        if (controller !== activeController) return;
+        if (response.status !== 200) {
+          const error = await response.json();
+          throw new Error(error.error || error.message || "HTTP " + response.status);
+        }
+        if (!response.body) throw new Error("Trình duyệt không hỗ trợ đọc stream");
+        reader = response.body.getReader();
+        while (true) {
+          const {value, done} = await reader.read();
+          if (controller !== activeController) return;
+          if (done) break;
+          appendBytes(value);
+          for (const frame of takeFrames()) {
+            if (terminal) throw new Error("Có dữ liệu sau sự kiện kết thúc");
+            if (frame.type === 2) {
+              if (!started) throw new Error("Audio đến trước run_started");
+              scheduleAudio(frame.payload);
+            } else {
+              const event = JSON.parse(decoder.decode(frame.payload));
+              if (!event || typeof event.event !== "string") throw new Error("JSON frame thiếu event");
+              if (event.event === "run_started") {
+                if (started) throw new Error("run_started bị lặp");
+                started = true;
+              } else if (!started && event.event !== "error") {
+                throw new Error("Sự kiện đến trước run_started");
+              }
+              renderEvent(event);
+              if (event.event === "run_completed" || event.event === "error") terminal = event.event;
+            }
+          }
+        }
+        if (pending.length) throw new Error("Stream kết thúc giữa frame");
+        if (!terminal) throw new Error("Stream thiếu sự kiện kết thúc");
+        if (runFailed) stopRun($("status").textContent);
+        else finishPlayback(activeController);
+      } catch (error) {
+        if (controller !== activeController) return;
+        const message = runFailed ? $("status").textContent : "❌ " + error.message;
+        stopRun(message);
+      } finally {
+        reader?.releaseLock();
+      }
+    });
+
+    $("stop").addEventListener("click", () => stopRun());
+    $("reset").addEventListener("click", () => {
+      applyDefaults();
+      clearTelemetry();
+      $("status").textContent = "Sẵn sàng";
+    });
+    window.addEventListener("beforeunload", () => stopRun());
+    document.addEventListener("DOMContentLoaded", async () => {
+      try {
+        const response = await fetch("/api/config");
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        config = await response.json();
+        for (const voice of config.voices) {
+          const option = document.createElement("option");
+          option.value = voice.value;
+          option.textContent = voice.label;
+          $("voice").append(option);
+        }
+        for (const id of numericControls) {
+          for (const attribute of ["min", "max", "step"]) $(id).setAttribute(attribute, config.limits[id][attribute]);
+        }
+        $("text").maxLength = config.limits.text_max_length;
+        applyDefaults();
+        renderHardware(config.hardware);
+        setRunning(false);
+        $("status").textContent = "Sẵn sàng";
+      } catch (error) {
+        config = undefined;
+        setRunning(false);
+        $("status").textContent = "❌ Không tải được cấu hình: " + error.message;
+      }
+    });
+  </script>
+</body>
+</html>
