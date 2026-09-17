@@ -1,9 +1,12 @@
 import argparse
 import importlib.metadata
+import io
 import json
 import math
 import os
 import platform
+import secrets
+import string
 import struct
 import subprocess
 import sys
@@ -16,6 +19,7 @@ from datetime import datetime
 from datetime import timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import soundfile as sf
@@ -46,6 +50,7 @@ SAMPLING_LIMITS = {
 }
 REQUEST_FIELDS = {"text", "voice", *SAMPLING_DEFAULTS}
 UI_PATH = Path(__file__).with_name("stream_ui.html")
+OUTPUT_DIR = Path(__file__).with_name("output")
 
 
 def parse_args():
@@ -61,11 +66,6 @@ def parse_args():
         help="Văn bản cần đọc",
     )
     parser.add_argument("--voice", default="Mai Anh", help="Tên preset voice")
-    parser.add_argument(
-        "--save",
-        default=None,
-        help="Nếu đặt, lưu toàn bộ audio ra WAV, ví dụ output_stream.wav",
-    )
     parser.add_argument(
         "--warmup",
         action="store_true",
@@ -164,6 +164,20 @@ def encode_frame(frame_type, payload):
     return struct.pack("<BI", frame_type, len(payload)) + payload
 
 
+def wav_bytes(audio):
+    output = io.BytesIO()
+    sf.write(output, audio, SAMPLE_RATE, format="WAV")
+    return output.getvalue()
+
+
+def random_audio_filename():
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        stem = "".join(secrets.choice(alphabet) for _ in range(14))
+        if any(char.isalpha() for char in stem) and any(char.isdigit() for char in stem):
+            return stem + ".wav"
+
+
 def print_result(event):
     print("\n===== RESULT =====")
     print(f"Audio duration : {event['audio_duration_s']:.2f} s")
@@ -184,7 +198,7 @@ def print_result(event):
 
 def iter_stream_frames(
     tts, params, *, synchronize, perf_counter=time.perf_counter,
-    wall_now=lambda: datetime.now().astimezone(), save_path=None, save_lock=None,
+    wall_now=lambda: datetime.now().astimezone(), on_completed=None,
 ):
     request_id = uuid.uuid4().hex
     run_perf = perf_counter()
@@ -224,7 +238,7 @@ def iter_stream_frames(
             )
             chunk_index += 1
             total_samples += audio.size
-            if save_path:
+            if on_completed:
                 audio_parts.append(audio.copy())
             end_offset_ms = (chunk_end_perf - run_perf) * 1000
             if first_chunk_ms is None:
@@ -251,10 +265,8 @@ def iter_stream_frames(
             audio_duration / generation_time
             if generation_time and audio_duration else None
         )
-        if save_path and audio_parts:
-            lock = save_lock or threading.Lock()
-            with lock:
-                sf.write(save_path, np.concatenate(audio_parts), SAMPLE_RATE)
+        if on_completed and audio_parts:
+            on_completed(request_id, wav_bytes(np.concatenate(audio_parts)))
 
         completed = {
             "event": "run_completed", "request_id": request_id,
@@ -334,16 +346,54 @@ def hardware_info():
 def create_server(
     tts, args, host="127.0.0.1", port=8001, synchronize=None,
     perf_counter=None, wall_now=None, hardware=None, ui_path=UI_PATH,
+    output_dir=OUTPUT_DIR,
 ):
     if host != "127.0.0.1":
         raise ValueError("server host must be 127.0.0.1")
     ui_bytes = Path(ui_path).resolve().read_bytes()
     config = build_config(tts, args, hardware=hardware)
-    # ponytail: one lock serializes WAV writes; use per-path locks if throughput matters.
-    save_lock = threading.Lock()
+    audio_lock = threading.Lock()
+    latest_audio = {"request_id": None, "wav": None, "saved_path": None}
+    output_dir = Path(output_dir).resolve()
     synchronize = synchronize or torch.cuda.synchronize
     perf_counter = perf_counter or time.perf_counter
     wall_now = wall_now or (lambda: datetime.now().astimezone())
+
+    def remember_audio(request_id, wav):
+        with audio_lock:
+            latest_audio.update(
+                request_id=request_id, wav=wav, saved_path=None
+            )
+
+    def get_audio(request_id):
+        with audio_lock:
+            if request_id != latest_audio["request_id"]:
+                return None
+            return latest_audio["wav"]
+
+    def save_audio(request_id):
+        with audio_lock:
+            if request_id != latest_audio["request_id"] or not latest_audio["wav"]:
+                return None
+            if latest_audio["saved_path"]:
+                return latest_audio["saved_path"]
+            output_dir.mkdir(parents=True, exist_ok=True)
+            while True:
+                path = output_dir / random_audio_filename()
+                try:
+                    with path.open("xb") as file:
+                        file.write(latest_audio["wav"])
+                    break
+                except FileExistsError:
+                    continue
+                except OSError:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
+            latest_audio["saved_path"] = path
+            return path
 
     def send_json(handler, status, value):
         payload = json_payload(value)
@@ -356,7 +406,8 @@ def create_server(
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/":
+            target = urlsplit(self.path)
+            if target.path == "/":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(ui_bytes)))
@@ -364,14 +415,28 @@ def create_server(
                 self.wfile.write(ui_bytes)
                 return
 
-            if self.path == "/api/config":
+            if target.path == "/api/config":
                 send_json(self, 200, config)
+                return
+
+            if target.path == "/api/audio":
+                request_ids = parse_qs(target.query).get("request_id", [])
+                audio = get_audio(request_ids[0]) if len(request_ids) == 1 else None
+                if audio is None:
+                    send_json(self, 404, {"error": "audio not found"})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(audio)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(audio)
                 return
 
             self.send_error(404)
 
         def do_POST(self):
-            if self.path != "/api/stream":
+            if self.path not in {"/api/stream", "/api/save"}:
                 self.send_error(404)
                 return
 
@@ -400,8 +465,35 @@ def create_server(
                 if len(body) != length:
                     raise ValueError("incomplete request body")
                 request = json.loads(body.decode("utf-8"))
-                params = validate_stream_request(request, config)
             except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
+                send_json(self, 400, {"error": str(error)})
+                return
+
+            if self.path == "/api/save":
+                if (
+                    not isinstance(request, dict)
+                    or set(request) != {"request_id"}
+                    or not isinstance(request["request_id"], str)
+                ):
+                    send_json(self, 400, {"error": "invalid request_id"})
+                    return
+                try:
+                    path = save_audio(request["request_id"])
+                except OSError:
+                    send_json(self, 500, {"error": "cannot save audio"})
+                    return
+                if path is None:
+                    send_json(self, 404, {"error": "audio not found"})
+                    return
+                send_json(self, 200, {
+                    "filename": path.name,
+                    "path": str(path),
+                })
+                return
+
+            try:
+                params = validate_stream_request(request, config)
+            except ValueError as error:
                 send_json(self, 400, {"error": str(error)})
                 return
 
@@ -413,7 +505,7 @@ def create_server(
                 self.end_headers()
                 frames = iter_stream_frames(
                     tts, params, synchronize=synchronize, perf_counter=perf_counter,
-                    wall_now=wall_now, save_path=args.save, save_lock=save_lock,
+                    wall_now=wall_now, on_completed=remember_audio,
                 )
                 for frame_type, payload in frames:
                     self.wfile.write(encode_frame(frame_type, payload))
