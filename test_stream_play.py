@@ -51,8 +51,11 @@ class DashboardFileTest(unittest.TestCase):
         self.assertEqual(parser.tags_by_id["voice"], "select")
         for control in controls - {"text", "voice"}:
             self.assertEqual(parser.tags_by_id[control], "input")
-        for button in ("play", "stop", "reset"):
+        for button in ("play", "stop", "reset", "replay", "save"):
+            self.assertIn(button, parser.tags_by_id)
             self.assertEqual(parser.tags_by_id[button], "button")
+        self.assertIn("Phát lại", source)
+        self.assertIn("Lưu", source)
         for table_body in ("text-chunks-body", "audio-chunks-body"):
             self.assertEqual(parser.tags_by_id[table_body], "tbody")
         for metric in (
@@ -122,7 +125,7 @@ const element = (value = "") => ({{
   appendChild() {{}}, replaceChildren() {{}}, setAttribute() {{}}
 }});
 const elements = Object.fromEntries(Object.entries(values).map(([id, value]) => [id, element(value)]));
-for (const id of ["play", "stop", "reset", "metric-ttfa", "metric-duration", "metric-generation", "metric-rtf", "metric-speed", "metric-text-chunks", "metric-audio-chunks", "text-chunks-body", "audio-chunks-body", "hardware"]) elements[id] = element();
+for (const id of ["play", "stop", "reset", "replay", "save", "status", "metric-ttfa", "metric-duration", "metric-generation", "metric-rtf", "metric-speed", "metric-text-chunks", "metric-audio-chunks", "text-chunks-body", "audio-chunks-body", "hardware"]) elements[id] = element();
 const sandbox = {{
   TextDecoder, console, setTimeout, clearTimeout,
   window: {{addEventListener() {{}}}},
@@ -131,7 +134,7 @@ const sandbox = {{
     querySelectorAll: () => [], createElement: () => element()
   }}
 }};
-vm.runInNewContext({json.dumps(script)} + "\\nglobalThis.dashboard = {{requestPayload, resetInterimMetrics, updateInterimMetrics, renderEvent}};", sandbox);
+vm.runInNewContext({json.dumps(script)} + "\\nglobalThis.dashboard = {{requestPayload, resetInterimMetrics, updateInterimMetrics, renderEvent, setRunning, stopRun}};", sandbox);
 const assert = require("assert");
 assert.deepStrictEqual(JSON.parse(JSON.stringify(sandbox.dashboard.requestPayload())), {{
   text: "Xin chào", voice: "Mai Anh", temperature: 0.8, top_k: 100,
@@ -144,11 +147,18 @@ assert.deepStrictEqual(
   ["metric-ttfa", "metric-duration", "metric-generation", "metric-rtf", "metric-speed"].map(id => elements[id].textContent),
   ["1250.0 ms", "0.50 s", "1.25 s", "2.500", "0.40x"]
 );
-sandbox.dashboard.renderEvent({{event: "run_completed", first_chunk_ms: 1500, audio_duration_s: 2, generation_time_s: 2.5, rtf: 1.25, realtime_speed: 0.8, text_chunk_count: 1, audio_chunk_count: 4}});
+sandbox.dashboard.renderEvent({{event: "run_completed", request_id: "request-1", total_samples: 96000, first_chunk_ms: 1500, audio_duration_s: 2, generation_time_s: 2.5, rtf: 1.25, realtime_speed: 0.8, text_chunk_count: 1, audio_chunk_count: 4}});
+sandbox.dashboard.setRunning(false);
 assert.deepStrictEqual(
   ["metric-ttfa", "metric-duration", "metric-generation", "metric-rtf", "metric-speed"].map(id => elements[id].textContent),
   ["1500.0 ms", "2.00 s", "2.50 s", "1.250", "0.80x"]
 );
+assert.strictEqual(elements.replay.disabled, false);
+assert.strictEqual(elements.save.disabled, false);
+sandbox.dashboard.setRunning(true);
+sandbox.dashboard.stopRun();
+assert.strictEqual(elements.replay.disabled, true);
+assert.strictEqual(elements.save.disabled, true);
 sandbox.dashboard.resetInterimMetrics();
 sandbox.dashboard.updateInterimMetrics({{audio_ms: 100, end_offset_ms: 200}});
 assert.strictEqual(elements["metric-ttfa"].textContent, "200.0 ms");
@@ -231,7 +241,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_build_config_uses_cli_defaults_and_exact_limits(self):
         args = SimpleNamespace(
-            text="Văn bản mặc định", voice="Mai Anh", save=None,
+            text="Văn bản mặc định", voice="Mai Anh",
             warmup=False, port=8001, no_browser=True,
         )
         hardware = {
@@ -402,100 +412,95 @@ class StreamRobustnessTest(unittest.TestCase):
         )
 
     def test_generator_failure_emits_error_and_closes_inner_iterator(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "partial.wav"
-            inner = CloseAwareIterator(
-                [np.array([0.25], dtype=np.float32)], RuntimeError("codec failed")
-            )
-            perf, wall = self.clocks()
-            with contextlib.redirect_stderr(io.StringIO()):
-                frames = list(stream_play.iter_stream_frames(
-                    CloseAwareTTS(inner), valid_request(), synchronize=lambda: None,
-                    perf_counter=perf, wall_now=wall, save_path=path,
-                    save_lock=threading.Lock(),
-                ))
-            events = json_events(frames)
-            self.assertEqual(events[-1],
-                             {"event": "error", "message": "codec failed"})
-            self.assertTrue(inner.closed)
-            self.assertFalse(path.exists())
-            self.assertNotIn("run_completed", [event["event"] for event in events])
+        completed_audio = []
+        inner = CloseAwareIterator(
+            [np.array([0.25], dtype=np.float32)], RuntimeError("codec failed")
+        )
+        perf, wall = self.clocks()
+        with contextlib.redirect_stderr(io.StringIO()):
+            frames = list(stream_play.iter_stream_frames(
+                CloseAwareTTS(inner), valid_request(), synchronize=lambda: None,
+                perf_counter=perf, wall_now=wall,
+                on_completed=lambda *result: completed_audio.append(result),
+            ))
+        events = json_events(frames)
+        self.assertEqual(events[-1],
+                         {"event": "error", "message": "codec failed"})
+        self.assertTrue(inner.closed)
+        self.assertEqual(completed_audio, [])
+        self.assertNotIn("run_completed", [event["event"] for event in events])
 
-    def test_infer_stream_construction_failure_emits_error_without_save(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "partial.wav"
-            perf, wall = self.clocks()
-            with contextlib.redirect_stderr(io.StringIO()):
-                frames = list(stream_play.iter_stream_frames(
-                    InferConstructionFailureTTS(), valid_request(),
-                    synchronize=lambda: None, perf_counter=perf, wall_now=wall,
-                    save_path=path, save_lock=threading.Lock(),
-                ))
-            events = json_events(frames)
-            self.assertEqual(events[-1], {
-                "event": "error", "message": "infer setup failed",
-            })
-            self.assertFalse(path.exists())
-            self.assertNotIn("run_completed", [event["event"] for event in events])
+    def test_infer_stream_construction_failure_emits_error_without_audio(self):
+        completed_audio = []
+        perf, wall = self.clocks()
+        with contextlib.redirect_stderr(io.StringIO()):
+            frames = list(stream_play.iter_stream_frames(
+                InferConstructionFailureTTS(), valid_request(),
+                synchronize=lambda: None, perf_counter=perf, wall_now=wall,
+                on_completed=lambda *result: completed_audio.append(result),
+            ))
+        events = json_events(frames)
+        self.assertEqual(events[-1], {
+            "event": "error", "message": "infer setup failed",
+        })
+        self.assertEqual(completed_audio, [])
+        self.assertNotIn("run_completed", [event["event"] for event in events])
 
-    def test_synchronize_failure_emits_error_closes_iterator_and_skips_save(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "partial.wav"
-            inner = CloseAwareIterator([np.array([0.25], dtype=np.float32)])
-            perf, wall = self.clocks()
-            with contextlib.redirect_stderr(io.StringIO()):
-                frames = list(stream_play.iter_stream_frames(
-                    CloseAwareTTS(inner), valid_request(),
-                    synchronize=lambda: (_ for _ in ()).throw(
-                        RuntimeError("sync failed")
-                    ),
-                    perf_counter=perf, wall_now=wall, save_path=path,
-                    save_lock=threading.Lock(),
-                ))
-            events = json_events(frames)
-            self.assertEqual(events[-1], {
-                "event": "error", "message": "sync failed",
-            })
-            self.assertTrue(inner.closed)
-            self.assertFalse(path.exists())
-            self.assertNotIn("run_completed", [event["event"] for event in events])
+    def test_synchronize_failure_emits_error_closes_iterator_and_skips_audio(self):
+        completed_audio = []
+        inner = CloseAwareIterator([np.array([0.25], dtype=np.float32)])
+        perf, wall = self.clocks()
+        with contextlib.redirect_stderr(io.StringIO()):
+            frames = list(stream_play.iter_stream_frames(
+                CloseAwareTTS(inner), valid_request(),
+                synchronize=lambda: (_ for _ in ()).throw(
+                    RuntimeError("sync failed")
+                ),
+                perf_counter=perf, wall_now=wall,
+                on_completed=lambda *result: completed_audio.append(result),
+            ))
+        events = json_events(frames)
+        self.assertEqual(events[-1], {
+            "event": "error", "message": "sync failed",
+        })
+        self.assertTrue(inner.closed)
+        self.assertEqual(completed_audio, [])
+        self.assertNotIn("run_completed", [event["event"] for event in events])
 
-    def test_wave_write_failure_emits_error_closes_iterator_and_skips_save(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "partial.wav"
-            inner = CloseAwareIterator([np.array([0.25], dtype=np.float32)])
-            perf, wall = self.clocks()
-            with mock.patch.object(
-                stream_play.sf, "write", side_effect=RuntimeError("write failed")
-            ), contextlib.redirect_stderr(io.StringIO()):
-                frames = list(stream_play.iter_stream_frames(
-                    CloseAwareTTS(inner), valid_request(), synchronize=lambda: None,
-                    perf_counter=perf, wall_now=wall, save_path=path,
-                    save_lock=threading.Lock(),
-                ))
-            events = json_events(frames)
-            self.assertEqual(events[-1], {
-                "event": "error", "message": "write failed",
-            })
-            self.assertTrue(inner.closed)
-            self.assertFalse(path.exists())
-            self.assertNotIn("run_completed", [event["event"] for event in events])
+    def test_wave_encoding_failure_emits_error_and_skips_completed_audio(self):
+        completed_audio = []
+        inner = CloseAwareIterator([np.array([0.25], dtype=np.float32)])
+        perf, wall = self.clocks()
+        with mock.patch.object(
+            stream_play.sf, "write", side_effect=RuntimeError("write failed")
+        ), contextlib.redirect_stderr(io.StringIO()):
+            frames = list(stream_play.iter_stream_frames(
+                CloseAwareTTS(inner), valid_request(), synchronize=lambda: None,
+                perf_counter=perf, wall_now=wall,
+                on_completed=lambda *result: completed_audio.append(result),
+            ))
+        events = json_events(frames)
+        self.assertEqual(events[-1], {
+            "event": "error", "message": "write failed",
+        })
+        self.assertTrue(inner.closed)
+        self.assertEqual(completed_audio, [])
+        self.assertNotIn("run_completed", [event["event"] for event in events])
 
     def test_closing_outer_iterator_closes_inner_iterator(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "partial.wav"
-            inner = CloseAwareIterator([np.array([0.25], dtype=np.float32)] * 3)
-            perf, wall = self.clocks()
-            outer = stream_play.iter_stream_frames(
-                CloseAwareTTS(inner), valid_request(), synchronize=lambda: None,
-                perf_counter=perf, wall_now=wall, save_path=path,
-                save_lock=threading.Lock(),
-            )
-            next(outer)
-            next(outer)
-            outer.close()
-            self.assertTrue(inner.closed)
-            self.assertFalse(path.exists())
+        completed_audio = []
+        inner = CloseAwareIterator([np.array([0.25], dtype=np.float32)] * 3)
+        perf, wall = self.clocks()
+        outer = stream_play.iter_stream_frames(
+            CloseAwareTTS(inner), valid_request(), synchronize=lambda: None,
+            perf_counter=perf, wall_now=wall,
+            on_completed=lambda *result: completed_audio.append(result),
+        )
+        next(outer)
+        next(outer)
+        outer.close()
+        self.assertTrue(inner.closed)
+        self.assertEqual(completed_audio, [])
 
     def test_empty_audio_uses_null_ratios(self):
         perf = Sequence([0.0, 0.001, 0.002])
@@ -513,26 +518,23 @@ class StreamRobustnessTest(unittest.TestCase):
         self.assertIsNone(completed["rtf"])
         self.assertIsNone(completed["realtime_speed"])
 
-    def test_successful_save_writes_clipped_48khz_waveform(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "stream.wav"
-            perf = Sequence([0.0, 0.001, 0.011, 0.012, 0.020])
-            wall = Sequence([
-                datetime(2026, 9, 16, 14, 30, 0, tzinfo=timezone.utc),
-                datetime(2026, 9, 16, 14, 30, 0, 1000, tzinfo=timezone.utc),
-                datetime(2026, 9, 16, 14, 30, 0, 11000, tzinfo=timezone.utc),
-                datetime(2026, 9, 16, 14, 30, 0, 12000, tzinfo=timezone.utc),
-                datetime(2026, 9, 16, 14, 30, 0, 20000, tzinfo=timezone.utc),
-            ])
-            list(stream_play.iter_stream_frames(
-                FakeTTS(chunks=[np.array([-2.0, 0.5, 2.0], dtype=np.float32)]),
-                valid_request(), synchronize=lambda: None,
-                perf_counter=perf, wall_now=wall, save_path=path,
-                save_lock=threading.Lock(),
-            ))
-            audio, rate = sf.read(path, dtype="float32")
-            self.assertEqual(rate, 48_000)
-            np.testing.assert_allclose(audio, [-1.0, 0.5, 0.9999695], atol=1e-5)
+    def test_success_provides_complete_wav_without_writing_to_disk(self):
+        completed_audio = []
+        perf, wall = self.clocks()
+        frames = list(stream_play.iter_stream_frames(
+            FakeTTS(chunks=[np.array([-2.0, 0.5, 2.0], dtype=np.float32)]),
+            valid_request(), synchronize=lambda: None,
+            perf_counter=perf, wall_now=wall,
+            on_completed=lambda request_id, wav: completed_audio.append(
+                (request_id, wav)
+            ),
+        ))
+
+        completed = json_events(frames)[-1]
+        self.assertEqual(completed_audio[0][0], completed["request_id"])
+        audio, rate = sf.read(io.BytesIO(completed_audio[0][1]), dtype="float32")
+        self.assertEqual(rate, 48_000)
+        np.testing.assert_allclose(audio, [-1.0, 0.5, 0.9999695], atol=1e-5)
 
 
 class ValidationTest(unittest.TestCase):
@@ -600,14 +602,15 @@ class HttpServerTest(unittest.TestCase):
         self.ui_path = Path(self.tempdir.name) / "stream_ui.html"
         self.ui_path.write_text("<!doctype html><title>dashboard</title>", encoding="utf-8")
         self.args = SimpleNamespace(
-            text="Văn bản mặc định", voice="Mai Anh", save=None,
+            text="Văn bản mặc định", voice="Mai Anh",
             warmup=False, port=0, no_browser=True,
         )
         self.tts = FakeTTS()
+        self.output_dir = Path(self.tempdir.name) / "output"
         self.server = stream_play.create_server(
             self.tts, self.args, host="127.0.0.1", port=0,
             synchronize=lambda: None, hardware={"gpu": None},
-            ui_path=self.ui_path,
+            ui_path=self.ui_path, output_dir=self.output_dir,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -790,11 +793,93 @@ class HttpServerTest(unittest.TestCase):
         self.assertEqual(json.loads(frames[0][1])["event"], "run_started")
         self.assertEqual(json.loads(frames[-1][1])["event"], "run_completed")
 
+    def test_completed_audio_can_be_replayed_without_creating_output_file(self):
+        request_id = self.stream_once()
+
+        status, headers, wav = self.request(
+            "GET", f"/api/audio?request_id={request_id}"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "audio/wav")
+        audio, rate = sf.read(io.BytesIO(wav), dtype="float32")
+        self.assertEqual(rate, 48_000)
+        np.testing.assert_allclose(audio, [0.25, 0.9999695, -1.0, 0.5], atol=1e-5)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_save_creates_output_directory_and_random_alphanumeric_filename(self):
+        request_id = self.stream_once()
+        body = json.dumps({"request_id": request_id}).encode()
+
+        status, headers, payload = self.request(
+            "POST", "/api/save", body, {"Content-Type": "application/json"}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        result = json.loads(payload)
+        self.assertRegex(result["filename"], r"^[A-Za-z0-9]{14}\.wav$")
+        stem = Path(result["filename"]).stem
+        self.assertRegex(stem, r"[A-Za-z]")
+        self.assertRegex(stem, r"[0-9]")
+        saved = self.output_dir / result["filename"]
+        self.assertEqual(Path(result["path"]), saved.resolve())
+        self.assertEqual(list(self.output_dir.iterdir()), [saved])
+        audio, rate = sf.read(saved, dtype="float32")
+        self.assertEqual(rate, 48_000)
+        np.testing.assert_allclose(audio, [0.25, 0.9999695, -1.0, 0.5], atol=1e-5)
+
+    def test_audio_and_save_reject_unknown_request_id(self):
+        status, _, _ = self.request("GET", "/api/audio?request_id=unknown")
+        self.assertEqual(status, 404)
+
+        body = json.dumps({"request_id": "unknown"}).encode()
+        status, _, _ = self.request(
+            "POST", "/api/save", body, {"Content-Type": "application/json"}
+        )
+        self.assertEqual(status, 404)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_save_filesystem_error_returns_json_and_can_be_retried(self):
+        request_id = self.stream_once()
+        self.output_dir.write_text("not a directory", encoding="utf-8")
+        body = json.dumps({"request_id": request_id}).encode()
+
+        try:
+            status, headers, payload = self.request(
+                "POST", "/api/save", body,
+                {"Content-Type": "application/json"},
+            )
+        except http.client.RemoteDisconnected as error:
+            self.fail(f"server disconnected instead of returning JSON: {error}")
+
+        self.assertEqual(status, 500)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertEqual(json.loads(payload), {"error": "cannot save audio"})
+
+        self.output_dir.unlink()
+        status, _, _ = self.request(
+            "POST", "/api/save", body, {"Content-Type": "application/json"}
+        )
+        self.assertEqual(status, 200)
+
+    def stream_once(self):
+        body = json.dumps(valid_request(), ensure_ascii=False).encode()
+        status, _, payload = self.request(
+            "POST", "/api/stream", body,
+            {"Content-Type": "application/json; charset=utf-8"},
+        )
+        self.assertEqual(status, 200)
+        events = [json.loads(payload) for kind, payload in decode_frames(payload)
+                  if kind == stream_play.FRAME_JSON]
+        self.assertEqual(events[-1]["event"], "run_completed")
+        return events[-1]["request_id"]
+
 
 class StartupTest(unittest.TestCase):
     def test_main_prints_the_actual_server_url_for_a_custom_port(self):
         args = SimpleNamespace(
-            text="Văn bản mặc định", voice="Mai Anh", save=None,
+            text="Văn bản mặc định", voice="Mai Anh",
             warmup=False, port=9137, no_browser=True,
         )
         server = mock.Mock(server_port=9137)
