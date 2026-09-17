@@ -31,10 +31,10 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:'
 
 ## 2. Chạy dashboard
 
-Khuyến nghị chạy warm-up GPU và lưu kết quả cuối ra WAV:
+Khuyến nghị warm-up GPU trước khi mở dashboard:
 
 ```bash
-python stream_play.py --warmup --save output_stream.wav
+python stream_play.py --warmup
 ```
 
 Sau khi model tải xong, chương trình sẽ mở địa chỉ:
@@ -58,9 +58,21 @@ Trên dashboard:
    - `repetition_penalty`: hạn chế lặp âm hoặc lặp nội dung.
    - `max_chars`: số ký tự tối đa của mỗi text chunk.
    - `max_new_frames`: số frame audio tối đa được sinh cho mỗi chunk (`1`–`1200`, mặc định `300`).
-4. Nhấn **Phát stream**.
-5. Nhấn **Dừng** để huỷ request và dừng audio đang phát.
-6. Nhấn **Khôi phục mặc định** để trả các trường về cấu hình ban đầu.
+4. Nhấn **Phát** để bắt đầu stream.
+5. Khi stream và audio đang phát hoàn tất:
+   - Nhấn **Phát lại** để nghe lại audio hoàn chỉnh đang được giữ tạm trong RAM.
+   - Nhấn **Lưu** để ghi audio thành file WAV trong thư mục `output/`.
+6. Nhấn **Dừng** để huỷ request, dừng audio và xoá audio hoàn chỉnh đang giữ tạm.
+7. Nhấn **Đặt lại** để trả các trường về cấu hình ban đầu và xoá audio tạm.
+
+File chỉ được ghi xuống ổ đĩa sau khi nhấn **Lưu**. Nếu thư mục `output/`
+chưa tồn tại, chương trình sẽ tự tạo. Tên file gồm 14 ký tự chữ và số ngẫu
+nhiên, sau đó là đuôi `.wav`, ví dụ `Ab3xY7kL9mN2qR.wav`.
+
+Dashboard chỉ giữ audio hoàn chỉnh gần nhất. Khi bắt đầu stream mới, nhấn
+**Dừng**, nhấn **Đặt lại** hoặc inference gặp lỗi, audio tạm trước đó sẽ không
+còn khả dụng để phát lại hoặc lưu. Sau khi lưu thành công, nút **Lưu** được
+khóa để tránh tạo nhiều bản trùng.
 
 Trong lúc chạy, giao diện hiển thị:
 
@@ -110,14 +122,6 @@ Trên Windows PowerShell, có thể viết cùng lệnh trên một dòng:
 python stream_play.py --text "Xin chào, đây là nội dung kiểm tra." --voice "Mai Anh"
 ```
 
-Lưu audio sau mỗi request thành công:
-
-```bash
-python stream_play.py --save output_stream.wav
-```
-
-File WAV chỉ được ghi sau khi request hoàn tất. Nếu nhấn **Dừng** hoặc inference gặp lỗi, chương trình không ghi file audio dở.
-
 ## 5. Dừng server
 
 Quay lại terminal đang chạy chương trình và nhấn:
@@ -150,7 +154,7 @@ python stream_play.py --port 9000
 ### Có telemetry nhưng không nghe được audio
 
 - Đảm bảo dashboard được mở bằng trình duyệt Windows, không phải trình duyệt Linux trong WSL.
-- Nhấn trực tiếp **Phát stream** để trình duyệt cho phép khởi tạo Web Audio.
+- Nhấn trực tiếp **Phát** để trình duyệt cho phép khởi tạo Web Audio.
 - Kiểm tra tab không bị mute và Windows đang chọn đúng thiết bị phát.
 - Không mở trực tiếp file `stream_ui.html`; phải truy cập qua địa chỉ server `http://127.0.0.1:<port>/`.
 
