@@ -1,27 +1,82 @@
 # Hướng dẫn chạy VieNeu Streaming Dashboard
 
+Dashboard hỗ trợ phát giọng nói theo thời gian thực, theo dõi chi tiết hiệu
+năng từng chunk, phát lại kết quả vừa tạo và lưu audio hoàn chỉnh thành file
+WAV.
+
 ## 1. Yêu cầu
 
-- Chạy trong thư mục `my_test` trên Linux, WSL hoặc Windows.
-- Môi trường Python đã tồn tại tại `my_test/.venv` và được cài đầy đủ thư viện.
+- Linux, WSL hoặc Windows.
+- Python 3.12.
 - PyTorch nhận được GPU NVIDIA và CUDA.
 - Trình duyệt hỗ trợ Web Audio, ví dụ Chrome hoặc Edge.
 
-Kích hoạt môi trường trên Linux/WSL:
+### Tạo `.venv` trên Linux/WSL
 
 ```bash
-cd /duong/dan/toi/VieNeu-TTS/my_test
+git clone https://github.com/Shinoaki0145/VieNeu-TTS-V3-Turbo-Streaming-GPU.git
+cd VieNeu-TTS-V3-Turbo-Streaming-GPU
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+```
+
+Nếu lệnh tạo môi trường báo thiếu module `venv`, cài bổ sung rồi chạy lại:
+
+```bash
+sudo apt update
+sudo apt install python3.12-venv
+```
+
+### Tạo `.venv` trên Windows PowerShell
+
+```powershell
+git clone https://github.com/Shinoaki0145/VieNeu-TTS-V3-Turbo-Streaming-GPU.git
+cd VieNeu-TTS-V3-Turbo-Streaming-GPU
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+```
+
+### Cài thư viện cho GPU NVIDIA
+
+Sau khi đã kích hoạt `.venv`, chọn cách cài phù hợp với hệ điều hành.
+
+Trên Linux/WSL:
+
+```bash
+python -m pip install "vieneu[cuda]"
+```
+
+Trên Windows, cài PyTorch CUDA và các thư viện cần thiết:
+
+```bash
+python -m pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install "transformers==4.57.6"
+python -m pip install vieneu
+```
+
+Kiểm tra Python hiện tại có nằm trong `.venv` hay không:
+
+```bash
+which python
+python --version
+```
+
+Trên Linux/WSL, `which python` phải trả về đường dẫn kết thúc tương tự:
+
+```text
+.../VieNeu-TTS-V3-Turbo-Streaming-GPU/.venv/bin/python
+```
+
+Mỗi lần mở terminal Linux/WSL mới, kích hoạt lại môi trường bằng:
+
+```bash
+cd VieNeu-TTS-V3-Turbo-Streaming-GPU
 source .venv/bin/activate
 ```
 
-Kích hoạt môi trường trên Windows PowerShell:
-
-```powershell
-cd C:\duong\dan\toi\VieNeu-TTS\my_test
-.venv\Scripts\Activate.ps1
-```
-
-Các lệnh bên dưới được chạy sau khi `.venv` đã được kích hoạt.
+Các lệnh bên dưới được chạy sau khi `.venv` đã được tạo, cài thư viện và kích hoạt.
 
 Kiểm tra GPU:
 
@@ -59,15 +114,22 @@ Trên dashboard:
    - `max_chars`: số ký tự tối đa của mỗi text chunk.
    - `max_new_frames`: số frame audio tối đa được sinh cho mỗi chunk (`1`–`1200`, mặc định `300`).
 4. Nhấn **Phát** để bắt đầu stream.
-5. Khi stream và audio đang phát hoàn tất:
-   - Nhấn **Phát lại** để nghe lại audio hoàn chỉnh đang được giữ tạm trong RAM.
-   - Nhấn **Lưu** để ghi audio thành file WAV trong thư mục `output/`.
+5. Sau khi toàn bộ stream hoàn tất, hai nút sau sẽ được mở khóa:
+   - **Phát lại**: nghe lại audio hoàn chỉnh mà không chạy model thêm lần nữa.
+   - **Lưu**: ghi audio thành file WAV trong thư mục `output/` trên máy đang chạy server.
 6. Nhấn **Dừng** để huỷ request, dừng audio và xoá audio hoàn chỉnh đang giữ tạm.
 7. Nhấn **Đặt lại** để trả các trường về cấu hình ban đầu và xoá audio tạm.
 
-File chỉ được ghi xuống ổ đĩa sau khi nhấn **Lưu**. Nếu thư mục `output/`
-chưa tồn tại, chương trình sẽ tự tạo. Tên file gồm 14 ký tự chữ và số ngẫu
-nhiên, sau đó là đuôi `.wav`, ví dụ `Ab3xY7kL9mN2qR.wav`.
+Trong lúc stream, audio vẫn được phát theo từng chunk như bình thường. Nút
+**Phát lại** và **Lưu** chỉ dùng được sau khi request đã hoàn tất thành công.
+Nếu request đang chạy, bị dừng hoặc gặp lỗi, hai nút này sẽ bị khóa.
+
+File chỉ được ghi xuống ổ đĩa sau khi nhấn **Lưu**. Đây là thao tác lưu trên
+máy chạy `stream_play.py`, không phải tải file bằng trình quản lý tải xuống
+của trình duyệt. Nếu thư mục `output/` chưa tồn tại, chương trình sẽ tự tạo.
+Tên file gồm 14 ký tự chữ và số ngẫu nhiên, sau đó là đuôi `.wav`, ví dụ
+`Ab3xY7kL9mN2qR.wav`. Sau khi lưu thành công, giao diện sẽ hiển thị đường dẫn
+của file.
 
 Dashboard chỉ giữ audio hoàn chỉnh gần nhất. Khi bắt đầu stream mới, nhấn
 **Dừng**, nhấn **Đặt lại** hoặc inference gặp lỗi, audio tạm trước đó sẽ không
@@ -157,6 +219,19 @@ python stream_play.py --port 9000
 - Nhấn trực tiếp **Phát** để trình duyệt cho phép khởi tạo Web Audio.
 - Kiểm tra tab không bị mute và Windows đang chọn đúng thiết bị phát.
 - Không mở trực tiếp file `stream_ui.html`; phải truy cập qua địa chỉ server `http://127.0.0.1:<port>/`.
+
+### Nút Phát lại hoặc Lưu đang bị khóa
+
+- Chờ stream hiện tại chạy xong hoàn toàn. Hai nút chỉ được bật sau khi nhận được kết quả hoàn chỉnh.
+- Không nhấn **Dừng** hoặc **Đặt lại**, vì các thao tác này sẽ xoá audio đang giữ tạm.
+- Nếu inference báo lỗi, hãy chạy lại bằng nút **Phát**.
+
+### Không tìm thấy file WAV đã lưu
+
+Sau khi nhấn **Lưu**, kiểm tra thư mục `output/` trong thư mục repo. Giao diện
+cũng hiển thị đường dẫn file ngay sau khi lưu thành công. Nếu server chạy trên
+một máy khác, file nằm trên máy chạy server chứ không nằm trên máy đang mở
+trình duyệt.
 
 ### Model tải lần đầu lâu
 
